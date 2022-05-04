@@ -1,7 +1,9 @@
-import path from 'node:path'
 import fs from 'node:fs'
-import EventEmitter from 'node:events'
 import url from 'node:url'
+import path from 'node:path'
+import zlib from 'node:zlib'
+import stream from 'node:stream'
+import { EventEmitter } from 'node:events'
 import { parseFrequency, readFileStats, DEFAULT_FORMAT_NAME_FUNCTION } from './helpers.js'
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
@@ -23,8 +25,6 @@ class Rotator extends EventEmitter {
   #maxFiles
   #maxAge
 
-  #compress // todo
-
   #formatName
 
   #state = {
@@ -43,7 +43,6 @@ class Rotator extends EventEmitter {
     maxSize = null,
     maxFiles = null,
     maxAge = null,
-    compress = false,
     formatName = DEFAULT_FORMAT_NAME_FUNCTION
   }) {
     super()
@@ -61,7 +60,6 @@ class Rotator extends EventEmitter {
     this.#maxSize = maxSize
     this.#maxFiles = maxFiles
     this.#maxAge = maxAge
-    this.#compress = compress
     this.#formatName = formatName
   }
 
@@ -154,15 +152,25 @@ class Rotator extends EventEmitter {
       number
     })
 
+    const targetPath = path.resolve(this.#dirPath, name)
+
     switch (this.#behavior) {
-      case 'copytruncate': {
-        await fs.promises.copyFile(this.#filePath, path.resolve(this.#dirPath, name))
+      case 'create': {
+        await fs.promises.rename(this.#filePath, targetPath)
+        await fs.promises.writeFile(this.#filePath, '', { encoding: this.#encoding })
+        break
+      }
+      case 'copy_truncate': {
+        await fs.promises.copyFile(this.#filePath, targetPath)
         await fs.promises.truncate(this.#filePath, 0)
         break
       }
-      case 'create': {
-        await fs.promises.rename(this.#filePath, path.resolve(this.#dirPath, name))
-        await fs.promises.writeFile(this.#filePath, '', { encoding: this.#encoding })
+      case 'copy_compress_truncate': {
+        await stream.promises.pipeline(
+          fs.createReadStream(this.#filePath, { encoding: this.#encoding }),
+          zlib.createGzip(),
+          fs.createWriteStream(targetPath, { encoding: this.#encoding })
+        )
         break
       }
       default: {
@@ -171,8 +179,7 @@ class Rotator extends EventEmitter {
     }
 
     await this.#writeState(date, number)
-
-    this.removeOldFiles().catch(e => this.emit('error', e))
+    await this.removeOldFiles()
 
     return this
   }
