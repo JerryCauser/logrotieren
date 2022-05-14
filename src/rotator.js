@@ -6,10 +6,10 @@ import { EventEmitter } from 'node:events'
 import {
   parseFrequency,
   isHighFrequency,
-  readFileStats,
   validateBehavior,
   sanitizeValidateSize,
-  validateFrequency
+  sanitizeValidateFrequency,
+  checkDirAccess
 } from './helpers.js'
 import {
   DEFAULT_FORMAT_NAME_FUNCTION,
@@ -17,9 +17,8 @@ import {
   BEHAVIOR_COPY_COMPRESS_TRUNCATE,
   BEHAVIOR_COPY_TRUNCATE,
   BEHAVIOR_CREATE,
-  EVENT_ERROR,
   EVENT_ROTATE,
-  EVENT_READY
+  EVENT_READY, EVENT_ERROR
 } from './constants.js'
 
 /**
@@ -32,7 +31,7 @@ import {
  * @param {string|number|null} [options.maxSize=null]
  * @param {number|null} [options.filesLimit]
  * @param {number|null} [options.maxAge]
- // * @param {function} [options.formatName=DEFAULT_FORMAT_NAME_FUNCTION]
+ * @param {function} [options.formatName=DEFAULT_FORMAT_NAME_FUNCTION]
  * @param {string} [options.cwd=process.cwd()]
  * @param {string} [options.stateFileName='logstate.json']
  * @constructor
@@ -76,7 +75,7 @@ class Rotator extends EventEmitter {
     maxSize = null,
     filesLimit = null,
     maxAge = null,
-    // formatName = DEFAULT_FORMAT_NAME_FUNCTION, // TODO when rotator starts removing files based on state file then unccomment
+    formatName = DEFAULT_FORMAT_NAME_FUNCTION,
     cwd = process.cwd(),
     stateFileName = LOG_STATE_FILE_NAME,
     ...other
@@ -84,7 +83,7 @@ class Rotator extends EventEmitter {
     super(other)
 
     validateBehavior(behavior)
-    validateFrequency(frequency) // TODO it is optional
+    frequency = sanitizeValidateFrequency(frequency)
     maxSize = sanitizeValidateSize(maxSize)
 
     const { name, ext } = path.parse(filePath)
@@ -119,10 +118,18 @@ class Rotator extends EventEmitter {
       if (this.#state.lastRotationAt !== null) {
         this.#state.lastRotationAt = new Date(this.#state.lastRotationAt)
       }
+      if (Array.isArray(this.#state.files) && this.#state.files.length > 0) {
+        for (const file of this.#state.files) {
+          file.createdAt = new Date(file.createdAt)
+        }
+      } else {
+        this.#state.files = []
+      }
     } catch {
       this.#state = {
         lastRotationAt: null,
-        lastNumber: null
+        lastNumber: null,
+        files: []
       }
     }
   }
@@ -148,25 +155,19 @@ class Rotator extends EventEmitter {
 
     try {
       // TODO make listener for file creation. And start IDLE if file deleted
-      await fs.promises.access(this.#filePath, fs.constants.R_OK)
+      await fs.promises.access(this.#filePath, fs.constants.R_OK | fs.constants.W_OK)
     } catch {
-      const error = new Error('file_is_not_readable')
+      const error = new Error('file_is_not_accessible')
       error.file = this.#filePath
 
       throw error
     }
 
     try {
-      // TODO try to create file if it not exists
-      await fs.promises.access(
-        this.#dirPath,
-        fs.constants.R_OK | fs.constants.W_OK
-      )
+      await checkDirAccess(this.#dirPath)
     } catch {
-      const error = new Error('dir_is_not_accessible')
-      error.file = this.#dirPath
-
-      throw error
+      await fs.promises.mkdir(this.#dirPath, { recursive: true })
+      await checkDirAccess(this.#dirPath)
     }
 
     if (this.#maxSize) {
@@ -225,7 +226,18 @@ class Rotator extends EventEmitter {
    * @returns {Promise<Rotator>}
    */
   async rotate (date = new Date()) {
-    // TODO check if file to rotate exists?
+    try {
+      await fs.promises.access(this.#filePath, fs.constants.R_OK | fs.constants.W_OK)
+    } catch (e) {
+      const error = new Error('file_is_not_accessible')
+      error.file = this.#filePath
+      error.ctx = e
+
+      this.emit(EVENT_ERROR, error)
+
+      return this
+    }
+
     const number = this.#getNumber(date)
 
     const name = this.#formatName({
@@ -265,10 +277,13 @@ class Rotator extends EventEmitter {
       }
     }
 
-    await this.#writeState(date, number)
-    await this.removeOldFiles()
+    const fileInfo = { createdAt: date, number, name, path: targetPath }
 
-    this.emit(EVENT_ROTATE, { date, number, name, path: targetPath })
+    this.#state.files.push(fileInfo)
+    await this.removeOldFiles()
+    await this.#writeState(date, number)
+
+    this.emit(EVENT_ROTATE, fileInfo)
 
     return this
   }
@@ -305,14 +320,12 @@ class Rotator extends EventEmitter {
   }
 
   async removeSurplus () {
-    if (!this.#filesLimit) return this
-
-    const files = await this.#readDir()
+    if (!this.#filesLimit || !this.#state.files?.length) return this
 
     const promises = []
 
-    while (files.length > this.#filesLimit) {
-      const file = files.pop()
+    while (this.#state.files.length > this.#filesLimit) {
+      const file = this.#state.files.shift()
       promises.push(fs.promises.rm(path.resolve(this.#dirPath, file.name)))
     }
 
@@ -322,59 +335,28 @@ class Rotator extends EventEmitter {
   }
 
   async removeOutdated () {
-    if (!this.#maxAge) return this
-
-    const files = await this.#readDir()
+    if (!this.#maxAge || !this.#state.files?.length) return this
 
     const promises = []
     const dateNow = Date.now()
 
-    for (const file of files) {
-      if (file.birthtimeMs + this.#maxAge < dateNow) {
-        promises.push(fs.promises.rm(path.resolve(this.#dirPath, file.name)))
+    for (let i = 0; i < this.#state.files.length; ++i) {
+      const file = this.#state.files[i]
+      if (file.createdAt.getTime() + this.#maxAge < dateNow) {
+        promises.push(
+          fs.promises
+            .rm(path.resolve(this.#dirPath, file.name))
+            .then(() => this.#state.files.splice(i, 1))
+        )
+      } else {
+        // order of files in array is preserved and sorted by creation time
+        break
       }
     }
 
     await Promise.allSettled(promises)
 
     return this
-  }
-
-  async #readDir () {
-    const dir = await fs.promises.readdir(this.#dirPath, {
-      encoding: this.#encoding
-    })
-
-    let files = []
-    // todo read files from state file
-    for (const fileName of dir) {
-      if (
-        fileName !== this.#nameWithExtension &&
-        fileName.includes(this.#name)
-      ) {
-        files.push(readFileStats(this.#dirPath, fileName))
-      }
-    }
-
-    files = (await Promise.allSettled(files))
-      .reduce((acc, res) => {
-        if (res.reason) {
-          const error = new Error(res.reason?.toString())
-          error.ctx = res.reason
-
-          this.emit(EVENT_ERROR, error)
-        } else {
-          if (res.value !== undefined && res.value.isFile()) {
-            acc.push(res.value)
-          }
-        }
-
-        return acc
-      }, [])
-      // includes(#name) need for filter "not our" files (for example when different logs are located at same directory
-      .sort((a, b) => b.birthtimeMs - a.birthtimeMs) // old at the end of array
-
-    return files
   }
 
   stop () {

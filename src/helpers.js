@@ -67,11 +67,17 @@ export function sanitizeValidateSize (maxSize) {
 }
 
 /**
- * @param {string} frequency
+ *
+ * @param {string|Null} [frequency]
+ * @returns {string|Null}
  */
-export function validateFrequency (frequency) {
+export function sanitizeValidateFrequency (frequency) {
+  if (frequency === null || frequency === undefined) {
+    return null
+  }
+
   if (FREQUENCY_LIST.includes(frequency)) {
-    return
+    return frequency
   }
 
   const error = new Error('frequency_not_recognized')
@@ -171,4 +177,19 @@ export async function readFileStats (dir, name) {
   stats.name = name
 
   return stats
+}
+
+/**
+ * @param {string} dirPath
+ * @returns {Promise<void>}
+ */
+export async function checkDirAccess (dirPath) {
+  try {
+    await fs.promises.access(dirPath, fs.constants.R_OK | fs.constants.W_OK)
+  } catch {
+    const error = new Error('dir_is_not_accessible')
+    error.file = dirPath
+
+    throw error
+  }
 }
