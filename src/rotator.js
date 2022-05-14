@@ -4,7 +4,6 @@ import zlib from 'node:zlib'
 import stream from 'node:stream'
 import { EventEmitter } from 'node:events'
 import {
-  DEFAULT_FORMAT_NAME_FUNCTION,
   parseFrequency,
   isHighFrequency,
   readFileStats,
@@ -13,6 +12,7 @@ import {
   validateFrequency
 } from './helpers.js'
 import {
+  DEFAULT_FORMAT_NAME_FUNCTION,
   LOG_STATE_FILE_NAME,
   BEHAVIOR_COPY_COMPRESS_TRUNCATE,
   BEHAVIOR_COPY_TRUNCATE,
