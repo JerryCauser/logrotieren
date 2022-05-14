@@ -6,8 +6,10 @@ import {
   FREQUENCY_MONTHLY,
   FREQUENCY_DAILY,
   FREQUENCY_HOURLY,
-  FREQUENCY_10S
-} from 'src/constants.js'
+  FREQUENCY_10S,
+  FREQUENCY_3S,
+  HIGH_FREQUENCY_LIST
+} from './constants.js'
 
 /**
  * @param {string} behavior
@@ -81,9 +83,8 @@ export function validateFrequency (frequency) {
  * @param {string} frequency
  * @returns {boolean}
  */
-export function isLowFrequency (frequency) {
-  return frequency === FREQUENCY_HOURLY ||
-    frequency === FREQUENCY_10S
+export function isHighFrequency (frequency) {
+  return HIGH_FREQUENCY_LIST.includes(frequency)
 }
 
 /**
@@ -134,6 +135,16 @@ export function parseFrequency (frequency) {
 
       return [prev, next]
     }
+
+    case FREQUENCY_3S: {
+      const prev = new Date()
+      prev.setMilliseconds(0)
+
+      const next = new Date(prev)
+      next.setSeconds(prev.getSeconds() + 3)
+
+      return [prev, next]
+    }
   }
 }
 
@@ -165,7 +176,8 @@ export const DEFAULT_FORMAT_NAME_FUNCTION = ({
   number,
   compress
 }) => {
-  name ??= 'logrotieren.'
+  name ??= 'logrotieren'
+  name += '.'
 
   if (date !== undefined && date !== null) {
     date = new Date(date)

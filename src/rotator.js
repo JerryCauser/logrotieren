@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import url from 'node:url'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import stream from 'node:stream'
@@ -7,35 +6,35 @@ import { EventEmitter } from 'node:events'
 import {
   DEFAULT_FORMAT_NAME_FUNCTION,
   parseFrequency,
-  isLowFrequency,
+  isHighFrequency,
   readFileStats,
   validateBehavior,
-  sanitizeValidateSize
+  sanitizeValidateSize,
+  validateFrequency
 } from './helpers.js'
 import {
+  LOG_STATE_FILE_NAME,
   BEHAVIOR_COPY_COMPRESS_TRUNCATE,
   BEHAVIOR_COPY_TRUNCATE,
   BEHAVIOR_CREATE,
   EVENT_ERROR,
   EVENT_ROTATE,
-  EVENT_PREROTATE,
   EVENT_READY
 } from './constants.js'
-
-const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
-const logStateFileName = 'logstate.json'
 
 /**
  * @param {object} options
  * @param {string} options.filePath
  * @param {string} options.dirPath
- * @param {string} [options.encoding='utf8']
  * @param {string} options.frequency - 'hourly', 'daily', 'monthly'
+ * @param {string} [options.encoding='utf8']
  * @param {string} [options.behavior='copy_truncate']
  * @param {string|number|null} [options.maxSize=null]
- * @param {number|null} [options.maxFiles]
+ * @param {number|null} [options.filesLimit]
  * @param {number|null} [options.maxAge]
- * @param {function} [options.formatName=DEFAULT_FORMAT_NAME_FUNCTION]
+ // * @param {function} [options.formatName=DEFAULT_FORMAT_NAME_FUNCTION]
+ * @param {string} [options.cwd=process.cwd()]
+ * @param {string} [options.stateFileName='logstate.json']
  * @constructor
  */
 class Rotator extends EventEmitter {
@@ -48,19 +47,22 @@ class Rotator extends EventEmitter {
   #encoding
 
   #frequency
+  #maxSize
   #behavior
 
-  #maxSize
-  #maxFiles
+  #filesLimit
   #maxAge
 
   #formatName
 
   #compress = false
   #state = {
-    lastDate: null,
+    lastRotationAt: null,
     lastNumber: null
   }
+
+  #cwd
+  #stateFileName
 
   #rotateTimeoutId
   #watcher
@@ -68,19 +70,21 @@ class Rotator extends EventEmitter {
   constructor ({
     filePath,
     dirPath,
-    encoding = 'utf8',
     frequency,
+    encoding = 'utf8',
     behavior = BEHAVIOR_COPY_TRUNCATE,
     maxSize = null,
-    maxFiles = null,
+    filesLimit = null,
     maxAge = null,
-    formatName = DEFAULT_FORMAT_NAME_FUNCTION,
+    // formatName = DEFAULT_FORMAT_NAME_FUNCTION, // TODO when rotator starts removing files based on state file then unccomment
+    cwd = process.cwd(),
+    stateFileName = LOG_STATE_FILE_NAME,
     ...other
   }) {
     super(other)
 
     validateBehavior(behavior)
-    validateBehavior(frequency)
+    validateFrequency(frequency) // TODO it is optional
     maxSize = sanitizeValidateSize(maxSize)
 
     const { name, ext } = path.parse(filePath)
@@ -92,29 +96,32 @@ class Rotator extends EventEmitter {
     this.#dirPath = dirPath
     this.#encoding = encoding
     this.#frequency = frequency
-    this.#behavior = behavior
     this.#maxSize = maxSize
-    this.#maxFiles = maxFiles
+    this.#behavior = behavior
+    this.#filesLimit = filesLimit
     this.#maxAge = maxAge
-    this.#formatName = formatName
+    this.#formatName = DEFAULT_FORMAT_NAME_FUNCTION
 
     this.#compress = behavior === BEHAVIOR_COPY_COMPRESS_TRUNCATE
+
+    this.#cwd = cwd
+    this.#stateFileName = stateFileName
   }
 
   async #readState () {
-    const fileBody = await fs.promises.readFile(
-      path.resolve(__dirname, logStateFileName),
-      { encoding: this.#encoding }
-    )
-
     try {
+      const fileBody = await fs.promises.readFile(
+        path.resolve(this.#cwd, this.#stateFileName),
+        { encoding: this.#encoding }
+      )
+
       this.#state = JSON.parse(fileBody.toString(this.#encoding).trim())
-      if (this.#state.lastDate !== null) {
-        this.#state.lastDate = new Date(this.#state.lastDate)
+      if (this.#state.lastRotationAt !== null) {
+        this.#state.lastRotationAt = new Date(this.#state.lastRotationAt)
       }
     } catch {
       this.#state = {
-        lastDate: null,
+        lastRotationAt: null,
         lastNumber: null
       }
     }
@@ -126,11 +133,11 @@ class Rotator extends EventEmitter {
    * @returns {Promise<void>}
    */
   async #writeState (date = null, number = null) {
-    this.#state.lastDate = date === null ? date : new Date(date)
+    this.#state.lastRotationAt = date === null ? date : new Date(date)
     this.#state.lastNumber = number
 
     await fs.promises.writeFile(
-      path.resolve(__dirname, logStateFileName),
+      path.resolve(this.#cwd, this.#stateFileName),
       JSON.stringify(this.#state, null, 2),
       { encoding: this.#encoding }
     )
@@ -140,6 +147,7 @@ class Rotator extends EventEmitter {
     await this.#readState()
 
     try {
+      // TODO make listener for file creation. And start IDLE if file deleted
       await fs.promises.access(this.#filePath, fs.constants.R_OK)
     } catch {
       const error = new Error('file_is_not_readable')
@@ -149,6 +157,7 @@ class Rotator extends EventEmitter {
     }
 
     try {
+      // TODO try to create file if it not exists
       await fs.promises.access(
         this.#dirPath,
         fs.constants.R_OK | fs.constants.W_OK
@@ -164,27 +173,26 @@ class Rotator extends EventEmitter {
       this.#initWatcher()
     }
 
-    this.emit(EVENT_READY, this)
+    if (this.#frequency) {
+      await this.#scheduleRotate()
+    }
 
-    await this.#scheduleRotate()
+    this.emit(EVENT_READY, this)
 
     return this
   }
 
   async #scheduleRotate () {
-    const [prev, next] = parseFrequency(this.#frequency)
+    const [prevRotation, nextRotation] = parseFrequency(this.#frequency)
 
-    if (this.#state.lastDate === null) {
-      await this.#writeState(prev, null)
+    if (this.#state.lastRotationAt === null) {
+      await this.#writeState(prevRotation, null)
+    } else if (this.#state.lastRotationAt.getTime() <= prevRotation.getTime()) {
+      process.nextTick(() => this.rotate())
     }
 
-    if (this.#state.lastDate.getTime() === prev.getTime()) {
-      const timeout = next.getTime() - Date.now()
-
-      this.#rotateTimeoutId = setTimeout(() => this.#scheduleRotate(), timeout)
-    } else if (this.#state.lastDate.getTime() <= prev.getTime()) {
-      await this.rotate()
-    }
+    const timeout = nextRotation.getTime() - Date.now()
+    this.#rotateTimeoutId = setTimeout(() => this.#scheduleRotate(), timeout)
   }
 
   #initWatcher () {
@@ -217,6 +225,7 @@ class Rotator extends EventEmitter {
    * @returns {Promise<Rotator>}
    */
   async rotate (date = new Date()) {
+    // TODO check if file to rotate exists?
     const number = this.#getNumber(date)
 
     const name = this.#formatName({
@@ -226,12 +235,10 @@ class Rotator extends EventEmitter {
       number
     })
 
-    this.emit(EVENT_PREROTATE, { date, number, name })
-
     const targetPath = path.resolve(this.#dirPath, name)
 
     try {
-      await fs.promises.unlink(targetPath)
+      await fs.promises.rm(targetPath)
     } catch {}
 
     switch (this.#behavior) {
@@ -261,7 +268,7 @@ class Rotator extends EventEmitter {
     await this.#writeState(date, number)
     await this.removeOldFiles()
 
-    this.emit(EVENT_ROTATE, { date, number, name })
+    this.emit(EVENT_ROTATE, { date, number, name, path: targetPath })
 
     return this
   }
@@ -273,16 +280,16 @@ class Rotator extends EventEmitter {
   #getNumber (date) {
     let number = null
 
-    if (isLowFrequency(this.#frequency) || this.#maxSize !== null) {
+    if (isHighFrequency(this.#frequency) || this.#maxSize !== null) {
       if (this.#state.lastNumber === null) {
         number = 0
       } else {
         if (
-          this.#state.lastDate.getFullYear() === date.getFullYear() &&
-          this.#state.lastDate.getMonth() === date.getMonth() &&
-          this.#state.lastDate.getDate() === date.getDate()
+          this.#state.lastRotationAt.getFullYear() === date.getFullYear() &&
+          this.#state.lastRotationAt.getMonth() === date.getMonth() &&
+          this.#state.lastRotationAt.getDate() === date.getDate()
         ) {
-          number = this.#state + 1
+          number = this.#state.lastNumber + 1
         } else {
           number = 0
         }
@@ -298,41 +305,37 @@ class Rotator extends EventEmitter {
   }
 
   async removeSurplus () {
-    if (!this.#maxFiles) {
-      const files = await this.#readDir()
+    if (!this.#filesLimit) return this
 
-      const promises = []
+    const files = await this.#readDir()
 
-      while (files.length > this.#maxFiles) {
-        const file = files.pop()
-        promises.push(
-          fs.promises.unlink(path.resolve(this.#dirPath, file.name))
-        )
-      }
+    const promises = []
 
-      await Promise.allSettled(promises)
+    while (files.length > this.#filesLimit) {
+      const file = files.pop()
+      promises.push(fs.promises.rm(path.resolve(this.#dirPath, file.name)))
     }
+
+    await Promise.allSettled(promises)
 
     return this
   }
 
   async removeOutdated () {
-    if (!this.#maxAge) {
-      const files = await this.#readDir()
+    if (!this.#maxAge) return this
 
-      const promises = []
-      const dateNow = Date.now()
+    const files = await this.#readDir()
 
-      for (const file of files) {
-        if (file.birthtimeMs + this.#maxAge < dateNow) {
-          promises.push(
-            fs.promises.unlink(path.resolve(this.#dirPath, file.name))
-          )
-        }
+    const promises = []
+    const dateNow = Date.now()
+
+    for (const file of files) {
+      if (file.birthtimeMs + this.#maxAge < dateNow) {
+        promises.push(fs.promises.rm(path.resolve(this.#dirPath, file.name)))
       }
-
-      await Promise.allSettled(promises)
     }
+
+    await Promise.allSettled(promises)
 
     return this
   }
@@ -343,9 +346,14 @@ class Rotator extends EventEmitter {
     })
 
     let files = []
-
+    // todo read files from state file
     for (const fileName of dir) {
-      files.push(readFileStats(this.#dirPath, fileName))
+      if (
+        fileName !== this.#nameWithExtension &&
+        fileName.includes(this.#name)
+      ) {
+        files.push(readFileStats(this.#dirPath, fileName))
+      }
     }
 
     files = (await Promise.allSettled(files))
@@ -356,12 +364,7 @@ class Rotator extends EventEmitter {
 
           this.emit(EVENT_ERROR, error)
         } else {
-          if (
-            res.value !== undefined &&
-            res.value.isFile() &&
-            res.value.name !== this.#nameWithExtension &&
-            res.value.name.includes(this.#name)
-          ) {
+          if (res.value !== undefined && res.value.isFile()) {
             acc.push(res.value)
           }
         }
