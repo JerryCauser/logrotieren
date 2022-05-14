@@ -65,14 +65,13 @@ module.exports = __toCommonJS(logrotieren_exports);
 
 // src/rotator.js
 var import_node_fs2 = __toESM(require("fs"), 1);
-var import_node_path2 = __toESM(require("path"), 1);
+var import_node_path = __toESM(require("path"), 1);
 var import_node_zlib = __toESM(require("zlib"), 1);
 var import_node_stream = __toESM(require("stream"), 1);
 var import_node_events = require("events");
 
 // src/helpers.js
 var import_node_fs = __toESM(require("fs"), 1);
-var import_node_path = __toESM(require("path"), 1);
 
 // src/constants.js
 var constants_exports = {};
@@ -81,6 +80,7 @@ __export(constants_exports, {
   BEHAVIOR_COPY_TRUNCATE: () => BEHAVIOR_COPY_TRUNCATE,
   BEHAVIOR_CREATE: () => BEHAVIOR_CREATE,
   BEHAVIOR_LIST: () => BEHAVIOR_LIST,
+  DEFAULT_FORMAT_NAME_FUNCTION: () => DEFAULT_FORMAT_NAME_FUNCTION,
   EVENT_ERROR: () => EVENT_ERROR,
   EVENT_READY: () => EVENT_READY,
   EVENT_ROTATE: () => EVENT_ROTATE,
@@ -90,6 +90,7 @@ __export(constants_exports, {
   FREQUENCY_HOURLY: () => FREQUENCY_HOURLY,
   FREQUENCY_LIST: () => FREQUENCY_LIST,
   FREQUENCY_MONTHLY: () => FREQUENCY_MONTHLY,
+  FREQUENCY_WEEKLY: () => FREQUENCY_WEEKLY,
   HIGH_FREQUENCY_LIST: () => HIGH_FREQUENCY_LIST,
   LOG_STATE_FILE_NAME: () => LOG_STATE_FILE_NAME
 });
@@ -103,12 +104,14 @@ var BEHAVIOR_LIST = [
   BEHAVIOR_COPY_COMPRESS_TRUNCATE
 ];
 var FREQUENCY_MONTHLY = "monthly";
+var FREQUENCY_WEEKLY = "weekly";
 var FREQUENCY_DAILY = "daily";
 var FREQUENCY_HOURLY = "hourly";
 var FREQUENCY_10S = "10s";
 var FREQUENCY_3S = "3s";
 var FREQUENCY_LIST = [
   FREQUENCY_MONTHLY,
+  FREQUENCY_WEEKLY,
   FREQUENCY_DAILY,
   FREQUENCY_HOURLY,
   FREQUENCY_10S,
@@ -122,6 +125,35 @@ var HIGH_FREQUENCY_LIST = [
 var EVENT_ERROR = "error";
 var EVENT_READY = "ready";
 var EVENT_ROTATE = "rotate";
+var DEFAULT_FORMAT_NAME_FUNCTION = ({
+  name,
+  extension,
+  date,
+  number,
+  compress
+}) => {
+  name ?? (name = "logrotieren");
+  name += ".";
+  if (date !== void 0 && date !== null) {
+    date = new Date(date);
+    const y = date.getFullYear();
+    const M = (date.getMonth() + 1).toString().padStart(2, "0");
+    const d = date.getDate().toString().padStart(2, "0");
+    name += `${y}-${M}-${d}.`;
+  }
+  if (number !== null && number !== void 0) {
+    name += `${number}.`;
+  }
+  if (extension !== null && extension !== void 0) {
+    name += extension;
+  } else {
+    name = name.slice(0, name.length - 1);
+  }
+  if (compress) {
+    name += ".gz";
+  }
+  return name;
+};
 
 // src/helpers.js
 function validateBehavior(behavior) {
@@ -161,9 +193,12 @@ function sanitizeValidateSize(maxSize) {
   error.ctx = { maxSize };
   throw error;
 }
-function validateFrequency(frequency) {
+function sanitizeValidateFrequency(frequency) {
+  if (frequency === null || frequency === void 0) {
+    return null;
+  }
   if (FREQUENCY_LIST.includes(frequency)) {
-    return;
+    return frequency;
   }
   const error = new Error("frequency_not_recognized");
   error.ctx = { frequency };
@@ -181,6 +216,15 @@ function parseFrequency(frequency) {
       prev.setHours(0, -prev.getTimezoneOffset(), 0, 0);
       const next = new Date(prev);
       next.setMonth(next.getMonth() + 1);
+      return [prev, next];
+    }
+    case FREQUENCY_WEEKLY: {
+      const prev = new Date();
+      const day = (prev.getDay() || 7) - 1;
+      prev.setDate(prev.getDate() - day);
+      prev.setHours(0, -prev.getTimezoneOffset(), 0, 0);
+      const next = new Date(prev);
+      next.setDate(next.getDate() + 7);
       return [prev, next];
     }
     case FREQUENCY_DAILY: {
@@ -213,43 +257,18 @@ function parseFrequency(frequency) {
     }
   }
 }
-async function readFileStats(dir, name) {
-  const stats = await import_node_fs.default.promises.stat(import_node_path.default.resolve(dir, name));
-  stats.name = name;
-  return stats;
+async function checkDirAccess(dirPath) {
+  try {
+    await import_node_fs.default.promises.access(dirPath, import_node_fs.default.constants.R_OK | import_node_fs.default.constants.W_OK);
+  } catch {
+    const error = new Error("dir_is_not_accessible");
+    error.file = dirPath;
+    throw error;
+  }
 }
-var DEFAULT_FORMAT_NAME_FUNCTION = ({
-  name,
-  extension,
-  date,
-  number,
-  compress
-}) => {
-  name ?? (name = "logrotieren");
-  name += ".";
-  if (date !== void 0 && date !== null) {
-    date = new Date(date);
-    const y = date.getFullYear();
-    const M = (date.getMonth() + 1).toString().padStart(2, "0");
-    const d = date.getDate().toString().padStart(2, "0");
-    name += `${y}-${M}-${d}.`;
-  }
-  if (number !== null && number !== void 0) {
-    name += `${number}.`;
-  }
-  if (extension !== null && extension !== void 0) {
-    name += extension;
-  } else {
-    name = name.slice(0, name.length - 1);
-  }
-  if (compress) {
-    name += ".gz";
-  }
-  return name;
-};
 
 // src/rotator.js
-var _filePath, _name, _extension, _nameWithExtension, _dirPath, _encoding, _frequency, _maxSize, _behavior, _filesLimit, _maxAge, _formatName, _compress, _state, _cwd, _stateFileName, _rotateTimeoutId, _watcher, _readState, readState_fn, _writeState, writeState_fn, _scheduleRotate, scheduleRotate_fn, _initWatcher, initWatcher_fn, _watchSizeHandler, _getNumber, getNumber_fn, _readDir, readDir_fn;
+var _filePath, _name, _extension, _nameWithExtension, _dirPath, _encoding, _frequency, _maxSize, _behavior, _filesLimit, _maxAge, _formatName, _compress, _state, _cwd, _stateFileName, _rotateTimeoutId, _watcher, _readState, readState_fn, _writeState, writeState_fn, _scheduleRotate, scheduleRotate_fn, _initWatcher, initWatcher_fn, _watchSizeHandler, _getNumber, getNumber_fn;
 var Rotator = class extends import_node_events.EventEmitter {
   constructor(_a) {
     var _b = _a, {
@@ -261,6 +280,7 @@ var Rotator = class extends import_node_events.EventEmitter {
       maxSize = null,
       filesLimit = null,
       maxAge = null,
+      formatName = DEFAULT_FORMAT_NAME_FUNCTION,
       cwd = process.cwd(),
       stateFileName = LOG_STATE_FILE_NAME
     } = _b, other = __objRest(_b, [
@@ -272,6 +292,7 @@ var Rotator = class extends import_node_events.EventEmitter {
       "maxSize",
       "filesLimit",
       "maxAge",
+      "formatName",
       "cwd",
       "stateFileName"
     ]);
@@ -281,7 +302,6 @@ var Rotator = class extends import_node_events.EventEmitter {
     __privateAdd(this, _scheduleRotate);
     __privateAdd(this, _initWatcher);
     __privateAdd(this, _getNumber);
-    __privateAdd(this, _readDir);
     __privateAdd(this, _filePath, void 0);
     __privateAdd(this, _name, void 0);
     __privateAdd(this, _extension, void 0);
@@ -320,9 +340,9 @@ var Rotator = class extends import_node_events.EventEmitter {
       }
     });
     validateBehavior(behavior);
-    validateFrequency(frequency);
+    frequency = sanitizeValidateFrequency(frequency);
     maxSize = sanitizeValidateSize(maxSize);
-    const { name, ext } = import_node_path2.default.parse(filePath);
+    const { name, ext } = import_node_path.default.parse(filePath);
     __privateSet(this, _filePath, filePath);
     __privateSet(this, _name, name);
     __privateSet(this, _extension, ext.slice(1));
@@ -342,21 +362,11 @@ var Rotator = class extends import_node_events.EventEmitter {
   async start() {
     await __privateMethod(this, _readState, readState_fn).call(this);
     try {
-      await import_node_fs2.default.promises.access(__privateGet(this, _filePath), import_node_fs2.default.constants.R_OK);
+      await checkDirAccess(__privateGet(this, _dirPath));
     } catch {
-      const error = new Error("file_is_not_readable");
-      error.file = __privateGet(this, _filePath);
-      throw error;
+      await import_node_fs2.default.promises.mkdir(__privateGet(this, _dirPath), { recursive: true });
+      await checkDirAccess(__privateGet(this, _dirPath));
     }
-    try {
-      await import_node_fs2.default.promises.access(__privateGet(this, _dirPath), import_node_fs2.default.constants.R_OK | import_node_fs2.default.constants.W_OK);
-    } catch {
-      const error = new Error("dir_is_not_accessible");
-      error.file = __privateGet(this, _dirPath);
-      throw error;
-    }
-    console.log("start", new Date());
-    console.log("start", __privateGet(this, _state));
     if (__privateGet(this, _maxSize)) {
       __privateMethod(this, _initWatcher, initWatcher_fn).call(this);
     }
@@ -367,7 +377,15 @@ var Rotator = class extends import_node_events.EventEmitter {
     return this;
   }
   async rotate(date = new Date()) {
-    console.log("rotate", new Date());
+    try {
+      await import_node_fs2.default.promises.access(__privateGet(this, _filePath), import_node_fs2.default.constants.R_OK | import_node_fs2.default.constants.W_OK);
+    } catch (e) {
+      const error = new Error("file_is_not_accessible");
+      error.file = __privateGet(this, _filePath);
+      error.ctx = e;
+      this.emit(EVENT_ERROR, error);
+      return this;
+    }
     const number = __privateMethod(this, _getNumber, getNumber_fn).call(this, date);
     const name = __privateGet(this, _formatName).call(this, {
       name: __privateGet(this, _name),
@@ -375,7 +393,7 @@ var Rotator = class extends import_node_events.EventEmitter {
       date,
       number
     });
-    const targetPath = import_node_path2.default.resolve(__privateGet(this, _dirPath), name);
+    const targetPath = import_node_path.default.resolve(__privateGet(this, _dirPath), name);
     try {
       await import_node_fs2.default.promises.rm(targetPath);
     } catch {
@@ -384,7 +402,8 @@ var Rotator = class extends import_node_events.EventEmitter {
       case BEHAVIOR_CREATE: {
         await import_node_fs2.default.promises.rename(__privateGet(this, _filePath), targetPath);
         await import_node_fs2.default.promises.writeFile(__privateGet(this, _filePath), "", {
-          encoding: __privateGet(this, _encoding)
+          encoding: __privateGet(this, _encoding),
+          flag: "a"
         });
         break;
       }
@@ -399,9 +418,11 @@ var Rotator = class extends import_node_events.EventEmitter {
         break;
       }
     }
-    await __privateMethod(this, _writeState, writeState_fn).call(this, date, number);
+    const fileInfo = { createdAt: date, number, name, path: targetPath };
+    __privateGet(this, _state).files.push(fileInfo);
     await this.removeOldFiles();
-    this.emit(EVENT_ROTATE, { date, number, name, path: targetPath });
+    await __privateMethod(this, _writeState, writeState_fn).call(this, date, number);
+    this.emit(EVENT_ROTATE, fileInfo);
     return this;
   }
   async removeOldFiles() {
@@ -409,28 +430,29 @@ var Rotator = class extends import_node_events.EventEmitter {
     await this.removeOutdated();
   }
   async removeSurplus() {
-    if (!__privateGet(this, _filesLimit))
+    var _a;
+    if (!__privateGet(this, _filesLimit) || !((_a = __privateGet(this, _state).files) == null ? void 0 : _a.length))
       return this;
-    const files = await __privateMethod(this, _readDir, readDir_fn).call(this);
     const promises = [];
-    while (files.length > __privateGet(this, _filesLimit)) {
-      const file = files.pop();
-      console.log("rm sur", file);
-      promises.push(import_node_fs2.default.promises.rm(import_node_path2.default.resolve(__privateGet(this, _dirPath), file.name)));
+    while (__privateGet(this, _state).files.length > __privateGet(this, _filesLimit)) {
+      const file = __privateGet(this, _state).files.shift();
+      promises.push(import_node_fs2.default.promises.rm(import_node_path.default.resolve(__privateGet(this, _dirPath), file.name)));
     }
     await Promise.allSettled(promises);
     return this;
   }
   async removeOutdated() {
-    if (!__privateGet(this, _maxAge))
+    var _a;
+    if (!__privateGet(this, _maxAge) || !((_a = __privateGet(this, _state).files) == null ? void 0 : _a.length))
       return this;
-    const files = await __privateMethod(this, _readDir, readDir_fn).call(this);
     const promises = [];
     const dateNow = Date.now();
-    for (const file of files) {
-      if (file.birthtimeMs + __privateGet(this, _maxAge) < dateNow) {
-        console.log("rm old", file);
-        promises.push(import_node_fs2.default.promises.rm(import_node_path2.default.resolve(__privateGet(this, _dirPath), file.name)));
+    for (let i = 0; i < __privateGet(this, _state).files.length; ++i) {
+      const file = __privateGet(this, _state).files[i];
+      if (file.createdAt.getTime() + __privateGet(this, _maxAge) < dateNow) {
+        promises.push(import_node_fs2.default.promises.rm(import_node_path.default.resolve(__privateGet(this, _dirPath), file.name)).then(() => __privateGet(this, _state).files.splice(i, 1)));
+      } else {
+        break;
       }
     }
     await Promise.allSettled(promises);
@@ -440,6 +462,7 @@ var Rotator = class extends import_node_events.EventEmitter {
     clearTimeout(__privateGet(this, _rotateTimeoutId));
     if (__privateGet(this, _watcher))
       __privateGet(this, _watcher).close();
+    return this;
   }
 };
 _filePath = new WeakMap();
@@ -463,15 +486,23 @@ _watcher = new WeakMap();
 _readState = new WeakSet();
 readState_fn = async function() {
   try {
-    const fileBody = await import_node_fs2.default.promises.readFile(import_node_path2.default.resolve(__privateGet(this, _cwd), __privateGet(this, _stateFileName)), { encoding: __privateGet(this, _encoding) });
+    const fileBody = await import_node_fs2.default.promises.readFile(import_node_path.default.resolve(__privateGet(this, _cwd), __privateGet(this, _stateFileName)), { encoding: __privateGet(this, _encoding) });
     __privateSet(this, _state, JSON.parse(fileBody.toString(__privateGet(this, _encoding)).trim()));
     if (__privateGet(this, _state).lastRotationAt !== null) {
       __privateGet(this, _state).lastRotationAt = new Date(__privateGet(this, _state).lastRotationAt);
     }
+    if (Array.isArray(__privateGet(this, _state).files) && __privateGet(this, _state).files.length > 0) {
+      for (const file of __privateGet(this, _state).files) {
+        file.createdAt = new Date(file.createdAt);
+      }
+    } else {
+      __privateGet(this, _state).files = [];
+    }
   } catch {
     __privateSet(this, _state, {
       lastRotationAt: null,
-      lastNumber: null
+      lastNumber: null,
+      files: []
     });
   }
 };
@@ -479,7 +510,7 @@ _writeState = new WeakSet();
 writeState_fn = async function(date = null, number = null) {
   __privateGet(this, _state).lastRotationAt = date === null ? date : new Date(date);
   __privateGet(this, _state).lastNumber = number;
-  await import_node_fs2.default.promises.writeFile(import_node_path2.default.resolve(__privateGet(this, _cwd), __privateGet(this, _stateFileName)), JSON.stringify(__privateGet(this, _state), null, 2), { encoding: __privateGet(this, _encoding) });
+  await import_node_fs2.default.promises.writeFile(import_node_path.default.resolve(__privateGet(this, _cwd), __privateGet(this, _stateFileName)), JSON.stringify(__privateGet(this, _state), null, 2), { encoding: __privateGet(this, _encoding) });
 };
 _scheduleRotate = new WeakSet();
 scheduleRotate_fn = async function() {
@@ -512,32 +543,6 @@ getNumber_fn = function(date) {
     }
   }
   return number;
-};
-_readDir = new WeakSet();
-readDir_fn = async function() {
-  const dir = await import_node_fs2.default.promises.readdir(__privateGet(this, _dirPath), {
-    encoding: __privateGet(this, _encoding)
-  });
-  let files = [];
-  for (const fileName of dir) {
-    if (fileName !== __privateGet(this, _nameWithExtension) && fileName.includes(__privateGet(this, _name))) {
-      files.push(readFileStats(__privateGet(this, _dirPath), fileName));
-    }
-  }
-  files = (await Promise.allSettled(files)).reduce((acc, res) => {
-    var _a;
-    if (res.reason) {
-      const error = new Error((_a = res.reason) == null ? void 0 : _a.toString());
-      error.ctx = res.reason;
-      this.emit(EVENT_ERROR, error);
-    } else {
-      if (res.value !== void 0 && res.value.isFile()) {
-        acc.push(res.value);
-      }
-    }
-    return acc;
-  }, []).sort((a, b) => b.birthtimeMs - a.birthtimeMs);
-  return files;
 };
 var rotator_default = Rotator;
 // Annotate the CommonJS export names for ESM import in node:
