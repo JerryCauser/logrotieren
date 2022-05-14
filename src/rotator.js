@@ -18,7 +18,8 @@ import {
   BEHAVIOR_COPY_TRUNCATE,
   BEHAVIOR_CREATE,
   EVENT_ROTATE,
-  EVENT_READY, EVENT_ERROR
+  EVENT_READY,
+  EVENT_ERROR
 } from './constants.js'
 
 /**
@@ -154,16 +155,6 @@ class Rotator extends EventEmitter {
     await this.#readState()
 
     try {
-      // TODO make listener for file creation. And start IDLE if file deleted
-      await fs.promises.access(this.#filePath, fs.constants.R_OK | fs.constants.W_OK)
-    } catch {
-      const error = new Error('file_is_not_accessible')
-      error.file = this.#filePath
-
-      throw error
-    }
-
-    try {
       await checkDirAccess(this.#dirPath)
     } catch {
       await fs.promises.mkdir(this.#dirPath, { recursive: true })
@@ -227,7 +218,10 @@ class Rotator extends EventEmitter {
    */
   async rotate (date = new Date()) {
     try {
-      await fs.promises.access(this.#filePath, fs.constants.R_OK | fs.constants.W_OK)
+      await fs.promises.access(
+        this.#filePath,
+        fs.constants.R_OK | fs.constants.W_OK
+      )
     } catch (e) {
       const error = new Error('file_is_not_accessible')
       error.file = this.#filePath
@@ -257,7 +251,8 @@ class Rotator extends EventEmitter {
       case BEHAVIOR_CREATE: {
         await fs.promises.rename(this.#filePath, targetPath)
         await fs.promises.writeFile(this.#filePath, '', {
-          encoding: this.#encoding
+          encoding: this.#encoding,
+          flag: 'a'
         })
         break
       }
@@ -362,6 +357,8 @@ class Rotator extends EventEmitter {
   stop () {
     clearTimeout(this.#rotateTimeoutId)
     if (this.#watcher) this.#watcher.close()
+
+    return this
   }
 }
 

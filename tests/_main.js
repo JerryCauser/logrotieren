@@ -181,6 +181,8 @@ async function _main ({ __dirname, Rotator, constants }) {
   ])
 
   // TODO test for basic logrotate by maxSize
+  // TODO test when log folder not exists
+  // TODO test when lof file not exists and appears after
   // TODO check work of scenario with deleting due to old age
   // TODO check work of scenario with deleting due to max files limit
   // TODO check if non current files are deleted
